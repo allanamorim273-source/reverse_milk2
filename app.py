@@ -115,6 +115,11 @@ def obter_campo_seguro(obj, chave, padrao=None):
         return obj.get(chave, padrao)
     return getattr(obj, chave, padrao)
 
+def calcular_quantis_seguros(datas_list, q50=0.5, q90=0.9):
+    """Garante o cálculo de quantis em listas, arrays numpy ou pd.Series sem AttributeError."""
+    s = pd.Series(datas_list)
+    return s.quantile(q50), s.quantile(q90)
+
 # ------------------------------------------------------------------------------
 # GERAÇÃO E CARREGAMENTO DE DADOS SINTÉTICOS
 # ------------------------------------------------------------------------------
@@ -196,7 +201,7 @@ def carregar_dados_sinteticos(n_ordens=40):
     return pd.DataFrame(ordens), rotas
 
 # ------------------------------------------------------------------------------
-# SIMULAÇÃO DE MONTE CARLO ROBUSTA (100% COMPATÍVEL COM TODOS OS TIPOS DE DATA)
+# SIMULAÇÃO DE MONTE CARLO ROBUSTA (100% COMPATÍVEL E PROTEGIDA)
 # ------------------------------------------------------------------------------
 def executar_monte_carlo(op_row, rota_etapas, n_simulacoes=1000, seed=42):
     np.random.seed(seed)
@@ -221,13 +226,11 @@ def executar_monte_carlo(op_row, rota_etapas, n_simulacoes=1000, seed=42):
         duracoes_totais += sim_etapa
         
     conclusoes_simuladas = [inicio + pd.Timedelta(minutes=float(d)) for d in duracoes_totais]
-    conclusoes_sorted = sorted(conclusoes_simuladas)
     
-    idx_p50 = int(n_simulacoes * 0.50)
-    idx_p90 = int(n_simulacoes * 0.90)
-    
-    p50_dt = conclusoes_sorted[idx_p50]
-    p90_dt = conclusoes_sorted[idx_p90]
+    # Cálculo seguro de quantis P50 e P90 usando pd.Series (resolve qualquer AttributeError)
+    fim_s = pd.Series(conclusoes_simuladas)
+    p50_dt = fim_s.quantile(0.5)
+    p90_dt = fim_s.quantile(0.9)
     
     # Subtração segura com Timedelta do Pandas
     atrasos = [max(0.0, (c - prazo).total_seconds() / 60.0) for c in conclusoes_simuladas]
@@ -480,7 +483,7 @@ with tab4:
         
     prazo_original = pd.to_datetime(op_info['prazo_entrega'])
     nova_conclusao = prazo_original + timedelta(minutes=atraso_adicional)
-    atraso_total = max(0, int((nova_conclusão - prazo_original).total_seconds() / 60))
+    atraso_total = max(0, int((nova_conclusao - prazo_original).total_seconds() / 60))
     
     st.markdown(f'<div class="kpi-card kpi-crit"><div class="kpi-title">NOVO HORÁRIO DE CONCLUSÃO PROJETADO</div><div class="kpi-value">{nova_conclusao.strftime("%d/%m/%Y às %H:%M")}</div><div class="kpi-sub">Impacto negativo: +{atraso_total} minutos de estouro do contrato</div></div>', unsafe_allow_html=True)
     
