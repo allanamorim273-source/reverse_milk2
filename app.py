@@ -63,7 +63,7 @@ st.markdown("""
     .kpi-success { border-left-color: #10B981; }
     .kpi-warn { border-left-color: #F59E0B; }
     
-    /* Destaques */
+    /* Destaques em Sliders e Radio Buttons */
     .stSlider > div > div > div > div {
         background-color: #1E88E5 !important;
     }
@@ -95,7 +95,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ------------------------------------------------------------------------------
-# FUNÇÕES AUXILIARES DE FORMATAÇÃO E ACESSO SEGURO (ZERO ATTRIBUTEERROR)
+# FUNÇÕES AUXILIARES DE FORMATAÇÃO E ACESSO SEGURO
 # ------------------------------------------------------------------------------
 def formatar_data_segura(val, formato='%d/%m %H:%M'):
     """Converte com segurança qualquer tipo de data/hora (datetime, Timestamp, np.datetime64, str) para string."""
@@ -108,7 +108,7 @@ def formatar_data_segura(val, formato='%d/%m %H:%M'):
         return str(val)[:16]
 
 def obter_campo_seguro(obj, chave, padrao=None):
-    """Acede a campos de dicionários ou atributos de objetos sem lançar AttributeError."""
+    """Acessa campos de dicionários ou atributos de objetos sem lançar AttributeError."""
     if obj is None:
         return padrao
     if isinstance(obj, dict):
@@ -165,25 +165,25 @@ def carregar_dados_sinteticos(n_ordens=40):
         rota = rotas[prod]
         duracao_padrao_total = sum(d for _, d, _ in rota)
         
-        hora_inicio_planejada = data_base + timedelta(hours=np.random.randint(0, 36))
-        prazo_entrega = hora_inicio_planejada + timedelta(minutes=duracao_padrao_total + np.random.choice([30, 60, 90, 120]))
+        hora_inicio_planejada = data_base + timedelta(hours=int(np.random.randint(0, 36)))
+        prazo_entrega = hora_inicio_planejada + timedelta(minutes=int(duracao_padrao_total + np.random.choice([30, 60, 90, 120])))
         
-        fator_desvio = np.random.lognormal(mean=0.05, sigma=0.15)
+        fator_desvio = float(np.random.lognormal(mean=0.05, sigma=0.15))
         duracao_real_total = int(duracao_padrao_total * fator_desvio)
         
         atraso_proj = (hora_inicio_planejada + timedelta(minutes=duracao_real_total)) - prazo_entrega
         atraso_min = max(0, int(atraso_proj.total_seconds() / 60))
         
-        prob_atraso = min(99.0, max(5.0, (atraso_min / 60.0) * 35.0 + np.random.uniform(5, 20)))
+        prob_atraso = min(99.0, max(5.0, (atraso_min / 60.0) * 35.0 + float(np.random.uniform(5, 20))))
         status = "CRÍTICO" if prob_atraso > 70 else ("ATENÇÃO" if prob_atraso > 30 else "NORMAL")
         
-        etapas_concluidas = np.random.randint(1, len(rota) + 1)
+        etapas_concluidas = int(np.random.randint(1, len(rota) + 1))
         
         ordens.append({
             "op_id": op_id,
             "produto": prod,
-            "inicio_planejado": hora_inicio_planejada,
-            "prazo_entrega": prazo_entrega,
+            "inicio_planejado": pd.to_datetime(hora_inicio_planejada),
+            "prazo_entrega": pd.to_datetime(prazo_entrega),
             "duracao_padrao_min": duracao_padrao_total,
             "duracao_real_min": duracao_real_total,
             "prob_atraso_pct": round(prob_atraso, 1),
@@ -196,12 +196,14 @@ def carregar_dados_sinteticos(n_ordens=40):
     return pd.DataFrame(ordens), rotas
 
 # ------------------------------------------------------------------------------
-# SIMULAÇÃO DE MONTE CARLO ROBUSTA
+# SIMULAÇÃO DE MONTE CARLO ROBUSTA (100% PROTEGIDA CONTRA ATTRIBUTEERROR)
 # ------------------------------------------------------------------------------
 def executar_monte_carlo(op_row, rota_etapas, n_simulacoes=1000, seed=42):
     np.random.seed(seed)
-    inicio = op_row['inicio_planejado']
-    prazo = op_row['prazo_entrega']
+    
+    # Garantia de conversão explícita para Timestamp do Pandas
+    inicio = pd.to_datetime(op_row['inicio_planejado'])
+    prazo = pd.to_datetime(op_row['prazo_entrega'])
     
     duracoes_totais = np.zeros(n_simulacoes)
     
@@ -218,7 +220,7 @@ def executar_monte_carlo(op_row, rota_etapas, n_simulacoes=1000, seed=42):
             )
         duracoes_totais += sim_etapa
         
-    conclusoes_simuladas = [inicio + timedelta(minutes=float(d)) for d in duracoes_totais]
+    conclusoes_simuladas = [inicio + pd.Timedelta(minutes=float(d)) for d in duracoes_totais]
     conclusoes_sorted = sorted(conclusoes_simuladas)
     
     idx_p50 = int(n_simulacoes * 0.50)
@@ -227,7 +229,8 @@ def executar_monte_carlo(op_row, rota_etapas, n_simulacoes=1000, seed=42):
     p50_dt = conclusoes_sorted[idx_p50]
     p90_dt = conclusoes_sorted[idx_p90]
     
-    atrasos = [max(0, (c - prazo).total_seconds() / 60.0) for c in conclusoes_simuladas]
+    # Subtração segura com total_seconds() de Timedelta
+    atrasos = [max(0.0, (c - prazo).total_seconds() / 60.0) for c in conclusoes_simuladas]
     prob_atraso = (sum(1 for a in atrasos if a > 0) / n_simulacoes) * 100.0
     
     return {
@@ -282,6 +285,12 @@ if uploaded_file is not None:
         df_ordens, rotas = carregar_dados_sinteticos(n_ordens)
 else:
     df_ordens, rotas = carregar_dados_sinteticos(n_ordens)
+
+# Garantir conversão de datas no DataFrame
+if 'inicio_planejado' in df_ordens.columns:
+    df_ordens['inicio_planejado'] = pd.to_datetime(df_ordens['inicio_planejado'])
+if 'prazo_entrega' in df_ordens.columns:
+    df_ordens['prazo_entrega'] = pd.to_datetime(df_ordens['prazo_entrega'])
 
 # ------------------------------------------------------------------------------
 # CORPO PRINCIPAL - INTERFACE EM 6 ABAS
@@ -373,7 +382,7 @@ with tab2:
     df_gantt = []
     curr_t = pd.to_datetime(op_row['inicio_planejado'])
     for etapa, dur, rec in rota_sel:
-        fim_t = curr_t + timedelta(minutes=int(dur))
+        fim_t = curr_t + pd.Timedelta(minutes=float(dur))
         df_gantt.append(dict(Task=etapa, Start=curr_t, Finish=fim_t, Resource=rec, Tipo="Planejado"))
         curr_t = fim_t
         
@@ -473,7 +482,7 @@ with tab4:
     nova_conclusao = prazo_original + timedelta(minutes=atraso_adicional)
     atraso_total = max(0, int((nova_conclusão - prazo_original).total_seconds() / 60))
     
-    st.markdown(f'<div class="kpi-card kpi-crit"><div class="kpi-title">NOVO HORÁRIO DE CONCLUSÃO PROJETADO</div><div class="kpi-value">{nova_conclusão.strftime("%d/%m/%Y às %H:%M")}</div><div class="kpi-sub">Impacto negativo: +{atraso_total} minutos de estouro do contrato</div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="kpi-card kpi-crit"><div class="kpi-title">NOVO HORÁRIO DE CONCLUSÃO PROJETADO</div><div class="kpi-value">{nova_conclusao.strftime("%d/%m/%Y às %H:%M")}</div><div class="kpi-sub">Impacto negativo: +{atraso_total} minutos de estouro do contrato</div></div>', unsafe_allow_html=True)
     
     dur_padrao = int(obter_campo_seguro(op_info, 'duracao_padrao_min', 485))
     df_cenarios = pd.DataFrame([
