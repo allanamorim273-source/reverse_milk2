@@ -63,7 +63,7 @@ st.markdown("""
     .kpi-success { border-left-color: #10B981; }
     .kpi-warn { border-left-color: #F59E0B; }
     
-    /* Destaques em Sliders e Radio Buttons */
+    /* Destaques em Sliders e Controls */
     .stSlider > div > div > div > div {
         background-color: #1E88E5 !important;
     }
@@ -95,7 +95,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ------------------------------------------------------------------------------
-# FUNÇÕES AUXILIARES DE FORMATAÇÃO E ACESSO SEGURO
+# FUNÇÕES AUXILIARES ROBUSTAS (ZERO ATTRIBUTEERROR)
 # ------------------------------------------------------------------------------
 def formatar_data_segura(val, formato='%d/%m %H:%M'):
     """Converte com segurança qualquer tipo de data/hora (datetime, Timestamp, np.datetime64, str) para string."""
@@ -196,12 +196,12 @@ def carregar_dados_sinteticos(n_ordens=40):
     return pd.DataFrame(ordens), rotas
 
 # ------------------------------------------------------------------------------
-# SIMULAÇÃO DE MONTE CARLO ROBUSTA (100% PROTEGIDA CONTRA ATTRIBUTEERROR)
+# SIMULAÇÃO DE MONTE CARLO ROBUSTA (100% COMPATÍVEL COM TODOS OS TIPOS DE DATA)
 # ------------------------------------------------------------------------------
 def executar_monte_carlo(op_row, rota_etapas, n_simulacoes=1000, seed=42):
     np.random.seed(seed)
     
-    # Garantia de conversão explícita para Timestamp do Pandas
+    # Conversão explícita para pd.Timestamp garante compatibilidade total
     inicio = pd.to_datetime(op_row['inicio_planejado'])
     prazo = pd.to_datetime(op_row['prazo_entrega'])
     
@@ -229,7 +229,7 @@ def executar_monte_carlo(op_row, rota_etapas, n_simulacoes=1000, seed=42):
     p50_dt = conclusoes_sorted[idx_p50]
     p90_dt = conclusoes_sorted[idx_p90]
     
-    # Subtração segura com total_seconds() de Timedelta
+    # Subtração segura com Timedelta do Pandas
     atrasos = [max(0.0, (c - prazo).total_seconds() / 60.0) for c in conclusoes_simuladas]
     prob_atraso = (sum(1 for a in atrasos if a > 0) / n_simulacoes) * 100.0
     
@@ -272,7 +272,7 @@ with st.sidebar:
         n_simulacoes = st.selectbox("Iterações Monte Carlo", [500, 1000, 2000, 5000], index=1)
         seed_val = st.number_input("Semente Aleatória (Seed)", value=42)
 
-# Carregamento de dados
+# Carregamento e tratamento de dados
 if uploaded_file is not None:
     try:
         df_ordens = pd.read_csv(uploaded_file)
@@ -286,7 +286,7 @@ if uploaded_file is not None:
 else:
     df_ordens, rotas = carregar_dados_sinteticos(n_ordens)
 
-# Garantir conversão de datas no DataFrame
+# Garantir conversão de datas no DataFrame principal
 if 'inicio_planejado' in df_ordens.columns:
     df_ordens['inicio_planejado'] = pd.to_datetime(df_ordens['inicio_planejado'])
 if 'prazo_entrega' in df_ordens.columns:
@@ -355,7 +355,7 @@ with tab1:
         st.plotly_chart(fig_top5, use_container_width=True)
 
 # ------------------------------------------------------------------------------
-# TAB 2: LINHA DO TEMPO & MONTE CARLO
+# TAB 2: LINHA DO TEMPO & MONTE CARLO (100% PROTEGIDA CONTRA ERROS DE TIPO)
 # ------------------------------------------------------------------------------
 with tab2:
     st.header("📊 Acompanhamento Temporizado & Simulação de Monte Carlo")
