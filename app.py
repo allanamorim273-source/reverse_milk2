@@ -5,6 +5,7 @@ from datetime import datetime, time, timedelta
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 from agendamento import BUFFER_MIN, agendamento_reverso, reprogramar
@@ -186,15 +187,16 @@ if modo.startswith("Operador"):
     visao_geral(simples=True)
     st.stop()
 
-tabs = st.tabs(["🚦 Visão geral", "📊 Linha do tempo e Monte Carlo", "⏪ Agendamento reverso",
-                "⚡ Simular atraso (E se...?)", "🔍 Gargalos e atrasos", "📋 Dados e premissas"])
+(tab_vis, tab_tl, tab_mc, tab_rev, tab_wi, tab_garg, tab_dados) = st.tabs(
+    ["🚦 Visão geral", "📊 Linha do tempo", "🎲 Monte Carlo", "⏪ Agendamento reverso",
+     "⚡ Simular atraso (E se...?)", "🔍 Gargalos e atrasos", "📋 Dados e premissas"])
 
 # ----------------------------- 1. visão geral -----------------------------
-with tabs[0]:
+with tab_vis:
     visao_geral()
 
 # ----------------------------- 2. linha do tempo + Monte Carlo -----------------------------
-with tabs[1]:
+with tab_tl:
     ordem_ops = ativas.sort_values("prob_atraso", ascending=False).op.tolist()
     ordem_ops += [o for o in r.op if o not in ordem_ops]
     op_sel = st.selectbox("Ordem de produção", ordem_ops)
@@ -216,35 +218,44 @@ with tabs[1]:
         fig.add_annotation(x=x, y=1.02, yref="paper", text=nome, showarrow=False, font=dict(color=cor))
     mostrar(tema(fig, 420))
 
-    st.subheader("🎲 Simulação de Monte Carlo")
-    t0, minutos = distribuicao_mc(d, agora, op_sel, buffer=BUFFER_MIN, n_sim=int(sims), seed=int(seed_mc))
-    if t0 is None:
-        ult = g.iloc[-1]
-        folga = (prazo - ult.real_fim).total_seconds() / 60
-        st.info(f"Ordem já concluída em {fmt(ult.real_fim)} "
-                f"({'dentro do prazo' if folga >= 0 else 'com atraso'}; margem de {folga:.0f} min). "
-                "Escolha uma ordem ativa para ver a simulação.")
+# ----------------------------- Monte Carlo -----------------------------
+with tab_mc:
+    st.header("🎲 Monte Carlo: quando esta ordem deve terminar?")
+    if not ordem_ops:
+        st.info("Não há ordens para simular.")
     else:
-        folga = (prazo - t0).total_seconds() / 60
-        p50 = np.percentile(minutos, 50)
-        p90 = np.percentile(minutos, 90)
-        prob_op = float((minutos > folga).mean())
-        c = st.columns(4)
-        c[0].metric("Prazo", fmt(prazo))
-        c[1].metric("P50 (mais provável)", fmt(t0 + timedelta(minutes=float(p50))))
-        c[2].metric("P90 (90% de segurança)", fmt(t0 + timedelta(minutes=float(p90))))
-        c[3].metric("Chance de atraso", f"{prob_op:.1%}")
-        hist = px.histogram(x=minutos, nbins=40, color_discrete_sequence=["#1E88E5"],
-                            title=f"Tempo restante simulado até concluir (a partir de {fmt(t0)})",
-                            labels={"x": "Minutos restantes", "y": "Frequência"})
-        hist.add_vline(x=folga, line_color="#EF4444", line_dash="dash", annotation_text="Prazo")
-        hist.add_vline(x=p50, line_color="#10B981", annotation_text="P50")
-        hist.add_vline(x=p90, line_color="#F59E0B", annotation_text="P90")
-        mostrar(tema(hist, 380))
-        st.caption("Barras à direita da linha vermelha são cenários em que a ordem termina depois do prazo.")
+        op_mc = st.selectbox("Ordem de produção", ordem_ops, key="mc_op")
+        prazo_mc = d[d.op == op_mc].prazo.iloc[0]
+        t0, minutos = distribuicao_mc(d, agora, op_mc, buffer=BUFFER_MIN, n_sim=int(sims), seed=int(seed_mc))
+        if t0 is None:
+            st.info("Esta ordem já foi concluída. Escolha uma ordem ativa (as de maior risco aparecem primeiro) "
+                    "ou volte o horário atual na barra lateral.")
+        else:
+            t0 = pd.Timestamp(t0)
+            fins = t0 + pd.to_timedelta(minutos, unit="m")
+            prob_mc = float((fins > prazo_mc).mean())
+            p50 = t0 + timedelta(minutes=float(np.percentile(minutos, 50)))
+            p90 = t0 + timedelta(minutes=float(np.percentile(minutos, 90)))
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Prob. de atraso", f"{prob_mc:.0%}")
+            m2.metric("Conclusão mais provável (P50)", fmt(p50))
+            m3.metric("Cenário pessimista (P90)", fmt(p90))
+            hist = go.Figure(go.Histogram(x=fins.to_pydatetime(), nbinsx=40, marker_color="#7EC8FF"))
+            hist.add_shape(type="line", x0=prazo_mc, x1=prazo_mc, y0=0, y1=1, yref="paper",
+                           line=dict(color="#EF4444", dash="dash", width=2))
+            hist.add_annotation(x=prazo_mc, y=1.04, yref="paper", text="Prazo", showarrow=False,
+                                font=dict(color="#E0E6ED", size=11))
+            hist.update_layout(xaxis_title="Conclusão simulada", yaxis_title="Simulações", bargap=0.02)
+            tema(hist, 420)
+            hist.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+            hist.update_yaxes(gridcolor="#2A2F3A")
+            hist.update_xaxes(gridcolor="#2A2F3A")
+            mostrar(hist)
+            st.caption(f"Simulação a partir de {fmt(t0)} ({int(sims)} cenários). "
+                       "Barras à direita da linha do prazo são cenários em que a ordem atrasa.")
 
 # ----------------------------- 3. agendamento reverso -----------------------------
-with tabs[2]:
+with tab_rev:
     st.caption("Parte do prazo de entrega e calcula, de trás para frente, o horário-limite de cada etapa.")
     a, b, c3, c4 = st.columns(4)
     prod = a.selectbox("Produto", list(ROTEIROS))
@@ -268,7 +279,7 @@ with tabs[2]:
     tabela(tv.rename(columns={"dur_padrao_min": "duração (min)", "plan_inicio": "início limite", "plan_fim": "fim limite"}))
 
 # ----------------------------- 4. what-if -----------------------------
-with tabs[3]:
+with tab_wi:
     st.subheader("A) Reprogramar uma ordem quando uma etapa atrasa")
     x1, x2, x3 = st.columns(3)
     op_w = x1.selectbox("Ordem", ordem_ops, key="w_op")
@@ -310,7 +321,7 @@ with tabs[3]:
     mostrar(tema(fig, 320))
 
 # ----------------------------- 5. gargalos -----------------------------
-with tabs[4]:
+with tab_garg:
     rk_rec, rk_eta = ranking(d, "recurso"), ranking(d, "etapa")
     if rk_rec.empty:
         st.info("Ainda não há etapas concluídas. Avance o horário atual na barra lateral.")
@@ -354,7 +365,7 @@ with tabs[4]:
             mostrar(tema(px.line(ap, x="ordem_etapa", y=["perda_media", "atraso_medio"], markers=True, title="Perda e atraso acumulado por posição na rota")))
 
 # ----------------------------- 6. dados e premissas -----------------------------
-with tabs[5]:
+with tab_dados:
     st.markdown(f"""
 **Premissas do modelo**
 - **Agendamento reverso:** parte do prazo e recua etapa a etapa, com folga de {BUFFER_MIN} min entre etapas.
