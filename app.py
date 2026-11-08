@@ -108,6 +108,7 @@ with st.sidebar:
         seed_mc = st.number_input("Semente Monte Carlo", value=7, step=1)
 
 df = None
+fonte = "dados sintéticos"
 if arq is not None:
     try:
         df = pd.read_csv(arq, parse_dates=DATAS)
@@ -115,6 +116,8 @@ if arq is not None:
         if faltam:
             st.sidebar.error(f"CSV sem as colunas: {', '.join(faltam)}. Usando dados sintéticos.")
             df = None
+        else:
+            fonte = "CSV próprio"
     except Exception as e:
         st.sidebar.error(f"Não consegui ler o CSV ({e}). Usando dados sintéticos.")
 if df is None:
@@ -137,7 +140,7 @@ r = calcular_resumo(d, agora, limite, int(sims))
 ativas = r[~r.status.str.startswith("Concluída")].copy()
 
 st.title("ReverseMilk – Planejamento Reverso e Simulação")
-st.caption("Sistema de apoio à decisão para laticínios | Agendamento reverso + simulação de Monte Carlo")
+st.caption(f"Status simulado: {pd.Timestamp(agora):%d/%m/%Y às %H:%M} · {fonte} (simulação estocástica)")
 
 
 def visao_geral(simples=False):
@@ -202,14 +205,17 @@ with tab_tl:
     op_sel = st.selectbox("Ordem de produção", ordem_ops)
     g = d[d.op == op_sel].sort_values("ordem_etapa")
     prazo = g.prazo.iloc[0]
+    n_ok = int((g.situacao == "Concluída").sum())
+    st_op = r.loc[r.op == op_sel, "status"].iloc[0]
+    st.progress(n_ok / len(g), text=f"Progresso: {n_ok} de {len(g)} etapas concluídas ({st_op})")
 
     plan = pd.DataFrame({"etapa": g.etapa, "inicio": g.plan_inicio, "fim": g.plan_fim, "Tipo": "Planejado"})
     ex = g[g.situacao != "Pendente"]
     real = pd.DataFrame({"etapa": ex.etapa, "inicio": ex.real_inicio,
-                         "fim": ex.real_fim.where(ex.real_fim <= agora, pd.Timestamp(agora)), "Tipo": "Real"})
+                         "fim": ex.real_fim.where(ex.real_fim <= agora, pd.Timestamp(agora)), "Tipo": "Realizado"})
     gantt = pd.concat([plan, real], ignore_index=True)
     fig = px.timeline(gantt, x_start="inicio", x_end="fim", y="etapa", color="Tipo",
-                      color_discrete_map={"Planejado": "#1E88E5", "Real": "#F59E0B"},
+                      color_discrete_map={"Planejado": "#1E88E5", "Realizado": "#F59E0B"},
                       category_orders={"etapa": list(g.etapa)}, title=f"Planejado x real – {op_sel}")
     fig.update_yaxes(autorange="reversed")
     fig.update_layout(barmode="group")
