@@ -1,483 +1,370 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-import plotly.express as px
-import plotly.graph_objects as go
-from datetime import datetime, timedelta
+"""ReverseMilk – app Streamlit (usa agendamento, indicadores, gerar_dados e analises)."""
 import os
+from datetime import datetime, time, timedelta
 
-# ------------------------------------------------------------------------------
-# CONFIGURAÇÃO DA PÁGINA & DESIGN SYSTEM (DARK EXECUTIVO)
-# ------------------------------------------------------------------------------
-st.set_page_config(
-    page_title="ReverseMilk – Planejamento Reverso e Simulação de Cenários Produtivos",
-    page_icon="🥛",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import streamlit as st
 
-# Estilização CSS Customizada (Dark Executive Theme)
+from agendamento import BUFFER_MIN, agendamento_reverso, reprogramar
+from analises import (atraso_por_posicao, avaliar, causa_principal, conclusoes,
+                      planejado_vs_real, ranking, sensibilidade)
+from gerar_dados import ROTEIROS, gerar
+from indicadores import classificar_etapas, distribuicao_mc, resumo_ops
+
+st.set_page_config(page_title="ReverseMilk – Planejamento Reverso e Simulação de Cenários Produtivos",
+                   page_icon="🥛", layout="wide", initial_sidebar_state="expanded")
+
 st.markdown("""
 <style>
-    /* Fundo principal e tipografia */
-    .stApp {
-        background-color: #12161F;
-        color: #E0E6ED;
-        font-family: 'Inter', sans-serif;
-    }
-    
-    /* Sidebar */
-    [data-testid="stSidebar"] {
-        background-color: #0A0D14;
-        border-right: 1px solid #1E2638;
-    }
-    
-    /* Cards de KPI Executivos */
-    .kpi-card {
-        background-color: #1A2130;
-        border-radius: 10px;
-        padding: 15px 20px;
-        border-left: 4px solid #1E88E5;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-        margin-bottom: 10px;
-    }
-    .kpi-title {
-        font-size: 0.85rem;
-        color: #94A3B8;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
-    }
-    .kpi-value {
-        font-size: 1.8rem;
-        font-weight: 700;
-        color: #FFFFFF;
-        margin-top: 5px;
-    }
-    .kpi-sub {
-        font-size: 0.8rem;
-        color: #38BDF8;
-        margin-top: 3px;
-    }
-    .kpi-crit { border-left-color: #EF4444; }
-    .kpi-success { border-left-color: #10B981; }
-    .kpi-warn { border-left-color: #F59E0B; }
-    
-    /* Destaques em Neon/Azul */
-    .stSlider > div > div > div > div {
-        background-color: #1E88E5 !important;
-    }
-    .stRadio > label {
-        color: #00E5FF !important;
-        font-weight: 600;
-    }
-    
-    /* Abas estilizadas */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 8px;
-        background-color: #0A0D14;
-        padding: 8px;
-        border-radius: 8px;
-    }
-    .stTabs [data-baseweb="tab"] {
-        height: 45px;
-        background-color: #1A2130;
-        border-radius: 6px;
-        color: #94A3B8;
-        font-weight: 600;
-        border: none;
-    }
-    .stTabs [aria-selected="true"] {
-        background-color: #1E88E5 !important;
-        color: #FFFFFF !important;
-    }
+.stApp {background-color:#12161F; color:#E0E6ED;}
+[data-testid="stSidebar"] {background-color:#0A0D14; border-right:1px solid #1E2638;}
+.kpi-card {background:#1A2130; border-radius:10px; padding:14px 18px; border-left:4px solid #1E88E5;
+           box-shadow:0 4px 12px rgba(0,0,0,.3); margin-bottom:10px;}
+.kpi-title {font-size:.8rem; color:#94A3B8; font-weight:600; text-transform:uppercase; letter-spacing:.5px;}
+.kpi-value {font-size:1.7rem; font-weight:700; color:#FFF; margin-top:4px;}
+.kpi-sub {font-size:.8rem; color:#38BDF8; margin-top:2px;}
+.kpi-crit {border-left-color:#EF4444;} .kpi-ok {border-left-color:#10B981;} .kpi-warn {border-left-color:#F59E0B;}
+.stTabs [data-baseweb="tab-list"] {gap:8px; background:#0A0D14; padding:8px; border-radius:8px;}
+.stTabs [data-baseweb="tab"] {height:42px; background:#1A2130; border-radius:6px; color:#94A3B8; font-weight:600;}
+.stTabs [aria-selected="true"] {background:#1E88E5 !important; color:#FFF !important;}
 </style>
 """, unsafe_allow_html=True)
 
-# ------------------------------------------------------------------------------
-# CARREGAMENTO / GERAÇÃO DE DADOS SINTÉTICOS
-# ------------------------------------------------------------------------------
-@st.cache_data
-def carregar_dados_sinteticos(n_ordens=40):
-    np.random.seed(42)
-    produtos = ["Leite Zero Lactose", "Queijo Prato", "Iogurte Natural", "Leite UHT Integral"]
-    
-    rotas = {
-        "Leite Zero Lactose": [
-            ("Liberação da matéria-prima", 30, "Recepção"),
-            ("Pasteurização", 45, "Pasteurizador 1"),
-            ("Transferência", 20, "Sistema Pulmão"),
-            ("Hidrólise enzimática", 240, "Tanque hidrólise"),
-            ("Formulação", 60, "Tanque formulação"),
-            ("Liberação da qualidade", 90, "Laboratório")
-        ],
-        "Queijo Prato": [
-            ("Liberação da matéria-prima", 30, "Recepção"),
-            ("Pasteurização", 45, "Pasteurizador 2"),
-            ("Coagulação e corte", 60, "Tanque Queijo"),
-            ("Prensagem", 120, "Prensa Automática"),
-            ("Salga", 240, "Tanque Salga"),
-            ("Liberação da qualidade", 90, "Laboratório")
-        ],
-        "Iogurte Natural": [
-            ("Liberação da matéria-prima", 30, "Recepção"),
-            ("Pasteurização", 40, "Pasteurizador 1"),
-            ("Inoculação e Fermentação", 300, "Tanque Fermentação"),
-            ("Resfriamento", 60, "Trocador Placas"),
-            ("Liberação da qualidade", 60, "Laboratório")
-        ],
-        "Leite UHT Integral": [
-            ("Liberação da matéria-prima", 30, "Recepção"),
-            ("Padronização", 30, "Padronizadora"),
-            ("Tratamento UHT", 45, "Esterilizador UHT"),
-            ("Envasamento Asséptico", 120, "Envasadora"),
-            ("Liberação da qualidade", 60, "Laboratório")
-        ]
-    }
-    
-    data_base = datetime(2026, 10, 5, 8, 0)
-    ordens = []
-    
-    for i in range(1, n_ordens + 1):
-        op_id = f"OP-10{i:02d}"
-        prod = np.random.choice(produtos)
-        rota = rotas[prod]
-        duracao_padrao_total = sum(d for _, d, _ in rota)
-        
-        hora_inicio_planejada = data_base + timedelta(hours=np.random.randint(0, 36))
-        prazo_entrega = hora_inicio_planejada + timedelta(minutes=duracao_padrao_total + np.random.choice([30, 60, 90, 120]))
-        
-        fator_desvio = np.random.lognormal(mean=0.05, sigma=0.15)
-        duracao_real_total = int(duracao_padrao_total * fator_desvio)
-        
-        atraso_proj = (hora_inicio_planejada + timedelta(minutes=duracao_real_total)) - prazo_entrega
-        atraso_min = max(0, int(atraso_proj.total_seconds() / 60))
-        
-        prob_atraso = min(99.0, max(5.0, (atraso_min / 60.0) * 35.0 + np.random.uniform(5, 20)))
-        status = "CRÍTICO" if prob_atraso > 70 else ("ATENÇÃO" if prob_atraso > 30 else "NORMAL")
-        
-        ordens.append({
-            "op_id": op_id,
-            "produto": prod,
-            "inicio_planejado": hora_inicio_planejada,
-            "prazo_entrega": prazo_entrega,
-            "duracao_padrao_min": duracao_padrao_total,
-            "duracao_real_min": duracao_real_total,
-            "prob_atraso_pct": round(prob_atraso, 1),
-            "status": status,
-            "desvio_min": duracao_real_total - duracao_padrao_total
-        })
-        
-    return pd.DataFrame(ordens), rotas
+CORES_STATUS = {"Atrasada": "#EF4444", "Em risco": "#F59E0B", "No prazo": "#10B981",
+                "Concluída no prazo": "#64748B", "Concluída com atraso": "#A855F7"}
+COLS = ["op", "produto", "ordem_etapa", "etapa", "recurso", "dur_padrao_min", "cv",
+        "plan_inicio", "plan_fim", "prazo", "real_inicio", "real_fim"]
+DATAS = ["plan_inicio", "plan_fim", "prazo", "real_inicio", "real_fim"]
 
-# ------------------------------------------------------------------------------
-# MOTOR DE SIMULAÇÃO DE MONTE CARLO
-# ------------------------------------------------------------------------------
-def executar_monte_carlo(op_row, rota_etapas, n_simulacoes=1000, seed=42):
-    np.random.seed(seed)
-    inicio = op_row['inicio_planejado']
-    prazo = op_row['prazo_entrega']
-    
-    durações_totais = np.zeros(n_simulacoes)
-    
-    for nome_etapa, dur_padrao, recurso in rota_etapas:
-        if "hidrólise" in nome_etapa.lower() or "fermentação" in nome_etapa.lower():
-            mu = np.log(dur_padrao) - 0.5 * (0.25**2)
-            sim_etapa = np.random.lognormal(mean=mu, sigma=0.25, size=n_simulacoes)
-        else:
-            sim_etapa = np.random.triangular(
-                left=dur_padrao * 0.9,
-                mode=dur_padrao,
-                right=dur_padrao * 1.3,
-                size=n_simulacoes
-            )
-        durações_totais += sim_etapa
-        
-    conclusoes_simuladas = [inicio + timedelta(minutes=float(d)) for d in durações_totais]
-    conclusoes_sorted = sorted(conclusoes_simuladas)
-    
-    idx_p50 = int(n_simulacoes * 0.50)
-    idx_p90 = int(n_simulacoes * 0.90)
-    
-    p50_dt = conclusoes_sorted[idx_p50]
-    p90_dt = conclusoes_sorted[idx_p90]
-    
-    atrasos = [max(0, (c - prazo).total_seconds() / 60.0) for c in conclusoes_simuladas]
-    prob_atraso = (sum(1 for a in atrasos if a > 0) / n_simulacoes) * 100.0
-    
-    return {
-        "p50": p50_dt,
-        "p90": p90_dt,
-        "prob_atraso": prob_atraso,
-        "prazo_final": prazo,
-        "durações_totais_min": durações_totais,
-        "conclusoes_dt": conclusoes_simuladas
-    }
 
-def formatar_data_hora(val):
-    if hasattr(val, 'strftime'):
-        return val.strftime('%d/%m %H:%M')
-    elif isinstance(val, str):
-        return val[:16]
-    return str(val)
+# ----------------------------- helpers -----------------------------
+def kpi(titulo, valor, sub="", cls=""):
+    st.markdown(f'<div class="kpi-card {cls}"><div class="kpi-title">{titulo}</div>'
+                f'<div class="kpi-value">{valor}</div><div class="kpi-sub">{sub}</div></div>',
+                unsafe_allow_html=True)
 
-# ------------------------------------------------------------------------------
-# SIDEBAR - CONTROLES DA FÁBRICA
-# ------------------------------------------------------------------------------
+
+def tema(fig, altura=None):
+    fig.update_layout(paper_bgcolor="#12161F", plot_bgcolor="#12161F", font_color="#E0E6ED",
+                      margin=dict(l=10, r=10, t=50, b=10), height=altura)
+    return fig
+
+
+def mostrar(fig):
+    """Compatível com versões novas e antigas do Streamlit."""
+    try:
+        st.plotly_chart(fig, width="stretch")
+    except Exception:
+        st.plotly_chart(fig, use_container_width=True)
+
+
+def tabela(df):
+    try:
+        st.dataframe(df, width="stretch", hide_index=True)
+    except Exception:
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+
+def fmt(ts):
+    return pd.Timestamp(ts).strftime("%d/%m %H:%M")
+
+
+@st.cache_data(show_spinner=False)
+def dados_sinteticos(n, seed):
+    return gerar(n_ops=n, seed=seed, base=datetime(2026, 10, 5, 6, 0))
+
+
+@st.cache_data(show_spinner=False)
+def calcular_resumo(d, agora, limite, sims):
+    return resumo_ops(d, agora, limite, n_sim=sims)
+
+
+@st.cache_data(show_spinner=False)
+def calcular_sens(d, agora, limite, sims, extra):
+    return sensibilidade(d, agora, limite, sims, extra_min=extra)
+
+
+@st.cache_data(show_spinner=False)
+def calcular_avaliar(d, agora, limite, sims, mult_cv, extra_min, recurso, prazo_min):
+    return avaliar(d, agora, limite, sims, mult_cv=mult_cv, extra_min=extra_min,
+                   recurso=recurso, prazo_min=prazo_min)
+
+
+# ----------------------------- sidebar -----------------------------
+topo = st.sidebar.container()
 with st.sidebar:
+    st.markdown("---")
+    modo = st.radio("Modo de visualização", ["Análise completa", "Operador (simples)"])
+    arq = st.file_uploader("Usar CSV próprio (opcional)", type=["csv"])
+    n_ops = st.number_input("Nº de ordens (dados sintéticos)", 10, 100, 40, step=5)
+    seed_dados = st.number_input("Semente dos dados", value=42, step=1)
+    tol = st.slider("Tolerância de atraso por etapa (min)", 0, 120, 30)
+    limite = st.slider("Folga mínima para não alertar (min)", 0, 180, 60)
+    with st.expander("⚙️ Avançado"):
+        sims = st.selectbox("Iterações Monte Carlo", [500, 1000, 2000, 5000], index=1)
+        seed_mc = st.number_input("Semente Monte Carlo", value=7, step=1)
+
+df = None
+if arq is not None:
+    try:
+        df = pd.read_csv(arq, parse_dates=DATAS)
+        faltam = [c for c in COLS if c not in df.columns]
+        if faltam:
+            st.sidebar.error(f"CSV sem as colunas: {', '.join(faltam)}. Usando dados sintéticos.")
+            df = None
+    except Exception as e:
+        st.sidebar.error(f"Não consegui ler o CSV ({e}). Usando dados sintéticos.")
+if df is None:
+    df = dados_sinteticos(int(n_ops), int(seed_dados))
+
+ini = df.plan_inicio.min().floor("h").to_pydatetime()
+fim = df.prazo.max().ceil("h").to_pydatetime()
+padrao = min(ini + timedelta(hours=30), fim)
+with topo:
     if os.path.exists("logo.png"):
-        st.image("logo.png", use_column_width=True)
+        st.image("logo.png")
     else:
         st.title("🥛 ReverseMilk")
-    st.markdown("---")
-    
-    modo_vis = st.radio("Modo de Visualização", ["Análise completa", "Operador (simples)"])
-    
-    st.subheader("⚙️ Parâmetros Operacionais")
-    horario_simulado = st.slider("Horário atual (simulado)", 
-                                 min_value=datetime(2026, 10, 5, 0, 0),
-                                 max_value=datetime(2026, 10, 7, 0, 0),
-                                 value=datetime(2026, 10, 6, 7, 0),
-                                 format="DD/MM HH:mm")
-    
-    uploaded_file = st.file_uploader("Usar CSV próprio (opcional)", type=["csv"])
-    
-    n_ordens = st.number_input("Nº de ordens (dados sintéticos)", min_value=10, max_value=100, value=40)
-    tolerancia_etapa = st.slider("Tolerância de atraso por etapa (min)", 0, 120, 30)
-    folga_minima = st.slider("Folga mínima para não alertar (min)", 0, 180, 60)
-    
-    with st.expander("⚙️ Configurações Avançadas"):
-        n_simulacoes = st.selectbox("Iterações Monte Carlo", [500, 1000, 2000, 5000], index=1)
-        seed_val = st.number_input("Semente Aleatória (Seed)", value=42)
+    agora = st.slider("Horário atual (simulado)", min_value=ini, max_value=fim, value=padrao,
+                      step=timedelta(minutes=30), format="DD/MM HH:mm")
 
-# Carregamento de Dados
-if uploaded_file is not None:
-    df_ordens = pd.read_csv(uploaded_file)
-    _, rotas = carregar_dados_sinteticos(n_ordens)
-else:
-    df_ordens, rotas = carregar_dados_sinteticos(n_ordens)
+# ----------------------------- cálculo central -----------------------------
+d = classificar_etapas(df, agora, tol)
+r = calcular_resumo(d, agora, limite, int(sims))
+ativas = r[~r.status.str.startswith("Concluída")].copy()
 
-# ------------------------------------------------------------------------------
-# CORPO PRINCIPAL - CABEÇALHO & TABs
-# ------------------------------------------------------------------------------
 st.title("ReverseMilk – Planejamento Reverso e Simulação")
-st.caption("Sistema de Apoio à Decisão (SAD) para a Indústria de Laticínios | Modelagem Estocástica & Backward Scheduling")
+st.caption("Sistema de apoio à decisão para laticínios | Agendamento reverso + simulação de Monte Carlo")
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "🚦 Visão geral",
-    "📊 Linha do tempo",
-    "⏪ Agendamento reverso",
-    "⚡ Simular atraso (E se...?)",
-    "🔍 Gargalos e Atrasos",
-    "📋 Dados e Premissas"
-])
 
-# ------------------------------------------------------------------------------
-# TAB 1: VISÃO GERAL
-# ------------------------------------------------------------------------------
-with tab1:
-    st.header("🚦 Painel Executivo & Alertas Preventivos")
-    
-    tot_ativas = len(df_ordens)
-    tot_criticas = len(df_ordens[df_ordens['status'] == 'CRÍTICO'])
-    taxa_sucesso = round((len(df_ordens[df_ordens['status'] == 'NORMAL']) / tot_ativas) * 100, 1)
-    desvio_medio = round(df_ordens['desvio_min'].mean(), 1)
-    
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.markdown(f'<div class="kpi-card"><div class="kpi-title">OPS ATIVAS</div><div class="kpi-value">{tot_ativas}</div><div class="kpi-sub">Monitoradas em tempo real</div></div>', unsafe_allow_html=True)
-    with col2:
-        st.markdown(f'<div class="kpi-card kpi-crit"><div class="kpi-title">OPS CRÍTICAS</div><div class="kpi-value">{tot_criticas}</div><div class="kpi-sub">Risco > 70% de estouro</div></div>', unsafe_allow_html=True)
-    with col3:
-        st.markdown(f'<div class="kpi-card kpi-success"><div class="kpi-title">TAXA DE SUCESSO</div><div class="kpi-value">{taxa_sucesso}%</div><div class="kpi-sub">Previsão no prazo</div></div>', unsafe_allow_html=True)
-    with col4:
-        st.markdown(f'<div class="kpi-card kpi-warn"><div class="kpi-title">DESVIO MÉDIO</div><div class="kpi-value">+{desvio_medio} min</div><div class="kpi-sub">Média estocástica fabril</div></div>', unsafe_allow_html=True)
-        
-    st.markdown("---")
-    st.subheader("⚠️ Alertas Preventivos Industriais")
-    
-    crit_ops = df_ordens[df_ordens['status'] == 'CRÍTICO']
-    if not crit_ops.empty:
-        st.error(f"🚨 **ALERTA CRÍTICO:** {len(crit_ops)} ordens apresentaram probabilidade de atraso acima do limite de segurança. Recomenda-se realocação imediata dos tanques de hidrólise.")
+def visao_geral(simples=False):
+    n_atr = int((ativas.status == "Atrasada").sum())
+    n_ris = int((ativas.status == "Em risco").sum())
+    prob = ativas.prob_atraso.mean() if len(ativas) else 0.0
+    c = st.columns(4)
+    with c[0]: kpi("Ordens ativas", len(ativas), f"{len(r) - len(ativas)} já concluídas")
+    with c[1]: kpi("Atrasadas", n_atr, "Projeção passa do prazo", "kpi-crit")
+    with c[2]: kpi("Em risco", n_ris, f"Folga < {limite} min", "kpi-warn")
+    with c[3]: kpi("Prob. média de atraso", f"{prob:.0%}", "Monte Carlo, ordens ativas", "kpi-ok")
+
+    if n_atr:
+        st.error(f"🚨 {n_atr} ordem(ns) com atraso projetado. Veja a tabela abaixo.")
+    elif n_ris:
+        st.warning(f"⚠️ {n_ris} ordem(ns) com folga abaixo de {limite} min.")
     else:
-        st.success("✅ **STATUS REGULAR:** Todas as ordens operando dentro dos parâmetros de folga mínima.")
+        st.success("✅ Todas as ordens ativas estão dentro da folga mínima.")
 
-    st.subheader("⚠️ Top 5 Ordens com Maior Risco de Atraso")
-    top5 = df_ordens.sort_values(by="prob_atraso_pct", ascending=False).head(5)
-    
-    fig_top5 = px.bar(
-        top5,
-        x="prob_atraso_pct",
-        y="op_id",
-        orientation="h",
-        color="status",
-        color_discrete_map={"CRÍTICO": "#EF4444", "ATENÇÃO": "#F59E0B", "NORMAL": "#10B981"},
-        text="prob_atraso_pct",
-        title="Probabilidade de Atraso por Ordem (%)"
-    )
-    fig_top5.update_layout(paper_bgcolor="#12161F", plot_bgcolor="#12161F", font_color="#E0E6ED")
-    st.plotly_chart(fig_top5, use_container_width=True)
+    if not simples:
+        for f in conclusoes(d, r):
+            st.markdown(f"- {f}")
+        if len(ativas):
+            top = ativas.sort_values("prob_atraso", ascending=False).head(10).copy()
+            top["prob_pct"] = top.prob_atraso * 100
+            fig = px.bar(top, x="prob_pct", y="op", orientation="h", color="status",
+                         color_discrete_map=CORES_STATUS, text=top.prob_pct.round(0).astype(int).astype(str) + "%",
+                         title="Top 10 ordens por probabilidade de atraso (%)",
+                         labels={"prob_pct": "Prob. de atraso (%)", "op": ""})
+            fig.update_yaxes(autorange="reversed")
+            mostrar(tema(fig))
 
-# ------------------------------------------------------------------------------
-# TAB 2: LINHA DO TEMPO & MONTE CARLO
-# ------------------------------------------------------------------------------
-with tab2:
-    st.header("📊 Acompanhamento Temporizado & Simulação de Monte Carlo")
-    
-    op_sel_id = st.selectbox("Selecione a Ordem de Produção para Análise:", df_ordens['op_id'].tolist())
-    op_row = df_ordens[df_ordens['op_id'] == op_sel_id].iloc[0]
-    prod_sel = op_row['produto']
-    rota_sel = rotas[prod_sel]
-    
-    st.subheader(f"Cronograma Gantt – {op_sel_id} ({prod_sel})")
-    
-    df_gantt = []
-    curr_t = op_row['inicio_planejado']
-    for etapa, dur, rec in rota_sel:
-        fim_t = curr_t + timedelta(minutes=dur)
-        df_gantt.append(dict(Task=etapa, Start=curr_t, Finish=fim_t, Resource=rec, Tipo="Planejado"))
-        curr_t = fim_t
-        
-    df_gantt_df = pd.DataFrame(df_gantt)
-    fig_gantt = px.timeline(df_gantt_df, x_start="Start", x_end="Finish", y="Task", color="Resource", title=f"Gantt Planejado: {op_sel_id}")
-    fig_gantt.update_yaxes(autorange="reversed")
-    fig_gantt.update_layout(paper_bgcolor="#12161F", plot_bgcolor="#12161F", font_color="#E0E6ED")
-    st.plotly_chart(fig_gantt, use_container_width=True)
-    
-    st.markdown("---")
-    st.subheader("🎲 Análise Probabilística de Risco (Monte Carlo)")
-    
-    res_mc = executar_monte_carlo(op_row, rota_sel, n_simulacoes=n_simulacoes, seed=int(seed_val))
-    
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Prazo Final", formatar_data_hora(res_mc['prazo_final']))
-    c2.metric("P50 (Mais provável)", formatar_data_hora(res_mc['p50']))
-    c3.metric("P90 (Segurança 90%)", formatar_data_hora(res_mc['p90']))
-    c4.metric("Chance de Atraso", f"{res_mc['prob_atraso']:.1f}%")
-    
-    fig_hist = px.histogram(
-        x=res_mc['durações_totais_min'],
-        nbins=40,
-        title="Distribuição Probabilística da Duração Total (Iterações Monte Carlo)",
-        labels={"x": "Duração Total (minutos)", "y": "Frequência"},
-        color_discrete_sequence=["#1E88E5"]
-    )
-    fig_hist.update_layout(paper_bgcolor="#12161F", plot_bgcolor="#12161F", font_color="#E0E6ED")
-    st.plotly_chart(fig_hist, use_container_width=True)
+    if len(ativas):
+        t = ativas.sort_values("prob_atraso", ascending=False)[
+            ["op", "produto", "etapa_atual", "status", "prob_atraso", "margem_min", "projecao_conclusao", "prazo"]].copy()
+        t["prob_atraso"] = (t.prob_atraso * 100).round(0).astype(int).astype(str) + "%"
+        t["margem_min"] = t.margem_min.round(0).astype(int)
+        t["projecao_conclusao"] = t.projecao_conclusao.map(fmt)
+        t["prazo"] = t.prazo.map(fmt)
+        tabela(t.rename(columns={"etapa_atual": "etapa atual", "prob_atraso": "prob. atraso",
+                                 "margem_min": "margem (min)", "projecao_conclusao": "projeção"}))
+    else:
+        st.info("Nenhuma ordem ativa neste momento. Mova o horário atual na barra lateral.")
 
-# ------------------------------------------------------------------------------
-# TAB 3: AGENDAMENTO REVERSO (BACKWARD SCHEDULING)
-# ------------------------------------------------------------------------------
-with tab3:
-    st.header("⏪ Algoritmo de Agendamento Reverso")
-    st.caption("Cálculo retroativo dos horários-limite de início a partir da data/hora de entrega exigida.")
-    
-    col_in1, col_in2, col_in3 = st.columns(3)
-    with col_in1:
-        prod_rev = st.selectbox("Produto Final", list(rotas.keys()), index=0)
-    with col_in2:
-        dt_entrega = st.date_input("Data de Entrega Exigida", datetime(2026, 10, 6))
-    with col_in3:
-        hr_entrega = st.time_input("Hora de Entrega Exigida", datetime(2026, 10, 6, 18, 0).time())
-        
-    buffer_folga = st.number_input("Folga de Segurança entre etapas (min)", 0, 60, 15)
-    
-    dt_hr_entrega = datetime.combine(dt_entrega, hr_entrega)
-    rota_rev = rotas[prod_rev]
-    dur_total = sum(d + buffer_folga for _, d, _ in rota_rev)
-    inicio_max_permitido = dt_hr_entrega - timedelta(minutes=dur_total)
-    
-    col_res1, col_res2 = st.columns(2)
-    with col_res1:
-        st.markdown(f'<div class="kpi-card kpi-success"><div class="kpi-title">INÍCIO MÁXIMO PERMITIDO</div><div class="kpi-value">{inicio_max_permitido.strftime("%d/%m/%Y às %H:%M")}</div><div class="kpi-sub">Momento impreterível para ligar a recepção</div></div>', unsafe_allow_html=True)
-    with col_res2:
-        st.markdown(f'<div class="kpi-card"><div class="kpi-title">DURAÇÃO TOTAL ESTIMADA</div><div class="kpi-value">{dur_total} min ({dur_total/60:.1f}h)</div><div class="kpi-sub">Com buffers operacionais incluídos</div></div>', unsafe_allow_html=True)
-        
-    st.subheader("Cronograma Retroativo Calculado")
-    etapas_rev = []
-    curr_end = dt_hr_entrega
-    for etapa, dur, rec in reversed(rota_rev):
-        curr_start = curr_end - timedelta(minutes=dur)
-        etapas_rev.append({"Etapa": etapa, "Início Limite": curr_start.strftime("%H:%M"), "Término Limite": curr_end.strftime("%H:%M"), "Duração (min)": dur, "Recurso": rec})
-        curr_end = curr_start - timedelta(minutes=buffer_folga)
-        
-    st.table(pd.DataFrame(list(reversed(etapas_rev))))
 
-# ------------------------------------------------------------------------------
-# TAB 4: SIMULAR ATRASO (E SE...?)
-# ------------------------------------------------------------------------------
-with tab4:
-    st.header("⚡ Simulação de Atrasos & Cenários (What-If)")
-    
-    col_s1, col_s2, col_s3 = st.columns(3)
-    with col_s1:
-        op_sim = st.selectbox("Selecione a OP para Teste:", df_ordens['op_id'].tolist(), key="sim_op")
-    with col_s2:
-        op_info = df_ordens[df_ordens['op_id'] == op_sim].iloc[0]
-        etapas_op = [e for e, _, _ in rotas[op_info['produto']]]
-        etapa_afetada = st.selectbox("Etapa com Falha/Desvio:", etapas_op, index=min(3, len(etapas_op)-1))
-    with col_s3:
-        atraso_adicional = st.slider("Atraso Adicional Simulado (min)", 0, 300, 120, step=15)
-        
-    nova_conclusão = op_info['prazo_entrega'] + timedelta(minutes=atraso_adicional)
-    atraso_total = max(0, int((nova_conclusão - op_info['prazo_entrega']).total_seconds() / 60))
-    
-    st.markdown(f'<div class="kpi-card kpi-crit"><div class="kpi-title">NOVO HORÁRIO DE CONCLUSÃO PROJETADO</div><div class="kpi-value">{nova_conclusão.strftime("%d/%m/%Y às %H:%M")}</div><div class="kpi-sub">Impacto negativo: +{atraso_total} minutos de estouro do contrato</div></div>', unsafe_allow_html=True)
-    
-    df_cenarios = pd.DataFrame([
-        {"Cenário": "Planejado Original", "Duração (min)": op_info['duracao_padrao_min']},
-        {"Cenário": "Simulado com Desvio", "Duração (min)": op_info['duracao_padrao_min'] + atraso_adicional}
-    ])
-    fig_cen = px.bar(df_cenarios, x="Cenário", y="Duração (min)", color="Cenário", color_discrete_sequence=["#1E88E5", "#EF4444"], text="Duração (min)")
-    fig_cen.update_layout(paper_bgcolor="#12161F", plot_bgcolor="#12161F", font_color="#E0E6ED")
-    st.plotly_chart(fig_cen, use_container_width=True)
+if modo.startswith("Operador"):
+    visao_geral(simples=True)
+    st.stop()
 
-# ------------------------------------------------------------------------------
-# TAB 5: GARGALOS E ATRASOS
-# ------------------------------------------------------------------------------
-with tab5:
-    st.header("🔍 Diagnóstico de Gargalos & Causa-Raiz")
-    
-    g1, g2, g3 = st.columns(3)
-    with g1:
-        st.markdown('<div class="kpi-card kpi-crit"><div class="kpi-title">RECURSO MAIS CRÍTICO</div><div class="kpi-value">Tanque Hidrólise</div><div class="kpi-sub">Acumula 58% das perdas totais</div></div>', unsafe_allow_html=True)
-    with g2:
-        st.markdown('<div class="kpi-card kpi-warn"><div class="kpi-title">ETAPA GARGALO</div><div class="kpi-value">Hidrólise Enzimática</div><div class="kpi-sub">Duração nominal: 240 minutos</div></div>', unsafe_allow_html=True)
-    with g3:
-        st.markdown('<div class="kpi-card"><div class="kpi-title">CONCENTRAÇÃO DE PERDAS</div><div class="kpi-value">74.2%</div><div class="kpi-sub">Foco principal de melhoria contínua</div></div>', unsafe_allow_html=True)
-        
-    st.subheader("Análise de Sensibilidade por Recurso (+30 min de impacto)")
-    df_sens = pd.DataFrame([
-        {"Recurso": "Tanque Hidrólise", "Aumento Risco (%)": 45.0},
-        {"Recurso": "Laboratório Qualidade", "Aumento Risco (%)": 22.5},
-        {"Recurso": "Pasteurizador 1", "Aumento Risco (%)": 12.0},
-        {"Recurso": "Tanque Formulação", "Aumento Risco (%)": 8.5},
-        {"Recurso": "Recepção Leite", "Aumento Risco (%)": 3.0}
-    ])
-    fig_sens = px.bar(df_sens, x="Aumento Risco (%)", y="Recurso", orientation="h", color="Aumento Risco (%)", color_continuous_scale="Reds")
-    fig_sens.update_layout(paper_bgcolor="#12161F", plot_bgcolor="#12161F", font_color="#E0E6ED")
-    st.plotly_chart(fig_sens, use_container_width=True)
+tabs = st.tabs(["🚦 Visão geral", "📊 Linha do tempo e Monte Carlo", "⏪ Agendamento reverso",
+                "⚡ Simular atraso (E se...?)", "🔍 Gargalos e atrasos", "📋 Dados e premissas"])
 
-# ------------------------------------------------------------------------------
-# TAB 6: DADOS E PREMISSAS
-# ------------------------------------------------------------------------------
-with tab6:
-    st.header("📋 Premissas Matemáticas & Exportação de Dados")
-    
-    st.markdown("""
-    **Modelagem Estocástica Adotada:**
-    - **Hidrólise Enzimática / Fermentação:** Distribuição Log-Normal ($\mu, \sigma=0.25$) para refletir assimetria à direita e valores estritamente positivos.
-    - **Demais Etapas:** Distribuição Triangular (mínimo: -10%, moda: nominal, máximo: +30%).
-    - **Métricas:** P50 (mediana estocástica) e P90 (limite superior de segurança de 90%).
-    """)
-    
-    st.subheader("Tabela Completa de Ordens Sintéticas")
-    st.dataframe(df_ordens, use_container_width=True)
-    
-    csv = df_ordens.to_csv(index=False).encode('utf-8')
-    st.download_button(
-        label="📥 Baixar Dados Sintéticos (CSV)",
-        data=csv,
-        file_name="reversemilk_ordens_sinteticas.csv",
-        mime="text/csv"
-    )
+# ----------------------------- 1. visão geral -----------------------------
+with tabs[0]:
+    visao_geral()
+
+# ----------------------------- 2. linha do tempo + Monte Carlo -----------------------------
+with tabs[1]:
+    ordem_ops = ativas.sort_values("prob_atraso", ascending=False).op.tolist()
+    ordem_ops += [o for o in r.op if o not in ordem_ops]
+    op_sel = st.selectbox("Ordem de produção", ordem_ops)
+    g = d[d.op == op_sel].sort_values("ordem_etapa")
+    prazo = g.prazo.iloc[0]
+
+    plan = pd.DataFrame({"etapa": g.etapa, "inicio": g.plan_inicio, "fim": g.plan_fim, "Tipo": "Planejado"})
+    ex = g[g.situacao != "Pendente"]
+    real = pd.DataFrame({"etapa": ex.etapa, "inicio": ex.real_inicio,
+                         "fim": ex.real_fim.where(ex.real_fim <= agora, pd.Timestamp(agora)), "Tipo": "Real"})
+    gantt = pd.concat([plan, real], ignore_index=True)
+    fig = px.timeline(gantt, x_start="inicio", x_end="fim", y="etapa", color="Tipo",
+                      color_discrete_map={"Planejado": "#1E88E5", "Real": "#F59E0B"},
+                      category_orders={"etapa": list(g.etapa)}, title=f"Planejado x real – {op_sel}")
+    fig.update_yaxes(autorange="reversed")
+    fig.update_layout(barmode="group")
+    for x, nome, cor in [(agora, "agora", "#38BDF8"), (prazo, "prazo", "#EF4444")]:
+        fig.add_shape(type="line", x0=x, x1=x, y0=0, y1=1, yref="paper", line=dict(color=cor, dash="dash"))
+        fig.add_annotation(x=x, y=1.02, yref="paper", text=nome, showarrow=False, font=dict(color=cor))
+    mostrar(tema(fig, 420))
+
+    st.subheader("🎲 Simulação de Monte Carlo")
+    t0, minutos = distribuicao_mc(d, agora, op_sel, buffer=BUFFER_MIN, n_sim=int(sims), seed=int(seed_mc))
+    if t0 is None:
+        ult = g.iloc[-1]
+        folga = (prazo - ult.real_fim).total_seconds() / 60
+        st.info(f"Ordem já concluída em {fmt(ult.real_fim)} "
+                f"({'dentro do prazo' if folga >= 0 else 'com atraso'}; margem de {folga:.0f} min). "
+                "Escolha uma ordem ativa para ver a simulação.")
+    else:
+        folga = (prazo - t0).total_seconds() / 60
+        p50 = np.percentile(minutos, 50)
+        p90 = np.percentile(minutos, 90)
+        prob_op = float((minutos > folga).mean())
+        c = st.columns(4)
+        c[0].metric("Prazo", fmt(prazo))
+        c[1].metric("P50 (mais provável)", fmt(t0 + timedelta(minutes=float(p50))))
+        c[2].metric("P90 (90% de segurança)", fmt(t0 + timedelta(minutes=float(p90))))
+        c[3].metric("Chance de atraso", f"{prob_op:.1%}")
+        hist = px.histogram(x=minutos, nbins=40, color_discrete_sequence=["#1E88E5"],
+                            title=f"Tempo restante simulado até concluir (a partir de {fmt(t0)})",
+                            labels={"x": "Minutos restantes", "y": "Frequência"})
+        hist.add_vline(x=folga, line_color="#EF4444", line_dash="dash", annotation_text="Prazo")
+        hist.add_vline(x=p50, line_color="#10B981", annotation_text="P50")
+        hist.add_vline(x=p90, line_color="#F59E0B", annotation_text="P90")
+        mostrar(tema(hist, 380))
+        st.caption("Barras à direita da linha vermelha são cenários em que a ordem termina depois do prazo.")
+
+# ----------------------------- 3. agendamento reverso -----------------------------
+with tabs[2]:
+    st.caption("Parte do prazo de entrega e calcula, de trás para frente, o horário-limite de cada etapa.")
+    a, b, c3, c4 = st.columns(4)
+    prod = a.selectbox("Produto", list(ROTEIROS))
+    dia = b.date_input("Data de entrega", datetime(2026, 10, 6))
+    hora = c3.time_input("Hora de entrega", time(18, 0))
+    buf = c4.number_input("Folga entre etapas (min)", 0, 60, BUFFER_MIN)
+    prazo_rev = datetime.combine(dia, hora)
+    dfp = pd.DataFrame(agendamento_reverso(prazo_rev, ROTEIROS[prod], buf))
+    inicio_max = dfp.plan_inicio.min()
+    total = (prazo_rev - inicio_max).total_seconds() / 60
+    k1, k2 = st.columns(2)
+    with k1: kpi("Início máximo permitido", inicio_max.strftime("%d/%m/%Y %H:%M"), "Momento limite para iniciar a 1ª etapa", "kpi-ok")
+    with k2: kpi("Duração total", f"{total:.0f} min ({total / 60:.1f} h)", "Com folgas entre etapas")
+    fig = px.timeline(dfp, x_start="plan_inicio", x_end="plan_fim", y="etapa", color="recurso",
+                      category_orders={"etapa": list(dfp.etapa)}, title="Cronograma retroativo")
+    fig.update_yaxes(autorange="reversed")
+    mostrar(tema(fig, 380))
+    tv = dfp[["etapa", "recurso", "dur_padrao_min", "plan_inicio", "plan_fim"]].copy()
+    tv["plan_inicio"] = tv.plan_inicio.map(fmt)
+    tv["plan_fim"] = tv.plan_fim.map(fmt)
+    tabela(tv.rename(columns={"dur_padrao_min": "duração (min)", "plan_inicio": "início limite", "plan_fim": "fim limite"}))
+
+# ----------------------------- 4. what-if -----------------------------
+with tabs[3]:
+    st.subheader("A) Reprogramar uma ordem quando uma etapa atrasa")
+    x1, x2, x3 = st.columns(3)
+    op_w = x1.selectbox("Ordem", ordem_ops, key="w_op")
+    gw = d[d.op == op_w].sort_values("ordem_etapa")
+    etapa_w = x2.selectbox("Etapa que atrasa", list(gw.etapa), index=min(3, len(gw) - 1))
+    atraso_w = x3.slider("Atraso adicional (min)", 0, 300, 120, step=15)
+    ordem_w = int(gw.loc[gw.etapa == etapa_w, "ordem_etapa"].iloc[0])
+    novo = reprogramar(gw[["ordem_etapa", "etapa", "plan_inicio", "plan_fim"]], ordem_w, atraso_w)
+    prazo_w = gw.prazo.iloc[0]
+    fim_novo = novo.novo_fim.max()
+    folga_w = (prazo_w - fim_novo).total_seconds() / 60
+    k1, k2 = st.columns(2)
+    with k1: kpi("Nova conclusão projetada", fim_novo.strftime("%d/%m %H:%M"), f"Prazo: {fmt(prazo_w)}",
+                 "kpi-crit" if folga_w < 0 else "kpi-ok")
+    with k2: kpi("Margem sobre o prazo", f"{folga_w:+.0f} min", "negativa = estouro do prazo",
+                 "kpi-crit" if folga_w < 0 else "kpi-ok")
+    tw = novo[["etapa", "plan_inicio", "novo_inicio", "plan_fim", "novo_fim", "deslocamento_min"]].copy()
+    for col in ["plan_inicio", "novo_inicio", "plan_fim", "novo_fim"]:
+        tw[col] = tw[col].map(fmt)
+    tabela(tw)
+
+    st.subheader("B) Cenários sobre todas as ordens ativas")
+    y1, y2, y3, y4 = st.columns(4)
+    mult = y1.slider("Variabilidade (× CV)", 0.5, 2.0, 1.0, 0.1)
+    extra = y2.slider("Tempo extra por etapa (min)", 0, 120, 30, 5)
+    rec = y3.selectbox("Recurso afetado", ["(nenhum)"] + sorted(d.recurso.unique()))
+    dprazo = y4.slider("Ajuste de prazo (min)", -240, 240, 0, 15)
+    base_av = calcular_avaliar(d, agora, limite, int(sims), 1.0, 0.0, None, 0.0)
+    cen_av = calcular_avaliar(d, agora, limite, int(sims), mult, float(extra),
+                              None if rec == "(nenhum)" else rec, float(dprazo))
+    m = st.columns(4)
+    m[0].metric("Prob. média de atraso", f"{cen_av['prob_media']:.1%}", f"{(cen_av['prob_media'] - base_av['prob_media']) * 100:+.1f} pp", delta_color="inverse")
+    m[1].metric("Atrasadas", cen_av["atrasadas"], cen_av["atrasadas"] - base_av["atrasadas"], delta_color="inverse")
+    m[2].metric("Em risco", cen_av["em_risco"], cen_av["em_risco"] - base_av["em_risco"], delta_color="inverse")
+    m[3].metric("Margem média (min)", f"{cen_av['margem_media_min']:.0f}", f"{cen_av['margem_media_min'] - base_av['margem_media_min']:+.0f}")
+    comp = pd.DataFrame({"Cenário": ["Base", "Simulado"], "Prob. média de atraso (%)": [base_av["prob_media"] * 100, cen_av["prob_media"] * 100]})
+    fig = px.bar(comp, x="Cenário", y="Prob. média de atraso (%)", color="Cenário",
+                 color_discrete_sequence=["#1E88E5", "#EF4444"], text_auto=".1f")
+    mostrar(tema(fig, 320))
+
+# ----------------------------- 5. gargalos -----------------------------
+with tabs[4]:
+    rk_rec, rk_eta = ranking(d, "recurso"), ranking(d, "etapa")
+    if rk_rec.empty:
+        st.info("Ainda não há etapas concluídas. Avance o horário atual na barra lateral.")
+    else:
+        t, e = rk_rec.iloc[0], rk_eta.iloc[0]
+        g1, g2, g3 = st.columns(3)
+        with g1: kpi("Recurso mais crítico", t.recurso, f"{t.pct_da_perda:.0%} dos minutos perdidos", "kpi-crit")
+        with g2: kpi("Etapa que mais perde tempo", e.etapa, f"Estourou o padrão em {e.pct_estouro:.0%} das execuções", "kpi-warn")
+        with g3: kpi("Minutos perdidos (total)", f"{rk_rec.perda_total_min.sum():,.0f}".replace(",", "."), "Estouro de ciclo + espera acima do buffer")
+
+        c1, c2 = st.columns(2)
+        with c1:
+            fig = px.bar(rk_rec.head(10), x="perda_total_min", y="recurso", orientation="h",
+                         title="Minutos perdidos por recurso", labels={"perda_total_min": "min", "recurso": ""})
+            fig.update_yaxes(autorange="reversed")
+            mostrar(tema(fig))
+        with c2:
+            cp = causa_principal(d, r)
+            if cp.empty:
+                st.info("Nenhuma ordem atrasada ainda para atribuir causa.")
+            else:
+                fig = px.bar(cp, x="ordens", y="recurso", orientation="h", title="Causa principal das ordens atrasadas")
+                fig.update_yaxes(autorange="reversed")
+                mostrar(tema(fig))
+
+        st.subheader("Sensibilidade: e se cada recurso demorar mais?")
+        extra_s = st.slider("Tempo extra por etapa (min)", 10, 120, 30, 10, key="extra_sens")
+        sens, base_s = calcular_sens(d, agora, limite, int(sims), extra_s)
+        fig = px.bar(sens, x="aumento_pp", y="recurso", orientation="h", color="aumento_pp",
+                     color_continuous_scale="Reds", title=f"Aumento da prob. média de atraso (pp) com +{extra_s} min",
+                     labels={"aumento_pp": "pontos percentuais", "recurso": ""})
+        fig.update_yaxes(autorange="reversed")
+        mostrar(tema(fig))
+
+        c3, c4 = st.columns(2)
+        with c3:
+            pv = planejado_vs_real(d).melt("etapa", var_name="tipo", value_name="min")
+            mostrar(tema(px.bar(pv, x="etapa", y="min", color="tipo", barmode="group", title="Duração planejada x real (etapas concluídas)")))
+        with c4:
+            ap = atraso_por_posicao(d)
+            mostrar(tema(px.line(ap, x="ordem_etapa", y=["perda_media", "atraso_medio"], markers=True, title="Perda e atraso acumulado por posição na rota")))
+
+# ----------------------------- 6. dados e premissas -----------------------------
+with tabs[5]:
+    st.markdown(f"""
+**Premissas do modelo**
+- **Agendamento reverso:** parte do prazo e recua etapa a etapa, com folga de {BUFFER_MIN} min entre etapas.
+- **Dados sintéticos:** duração de cada etapa = padrão × ruído log-normal (média 1, CV por etapa); 30% das ordens começam atrasadas; 3% das etapas têm parada de 30 a 120 min.
+- **Monte Carlo:** para cada ordem, simula só o que ainda não aconteceu (etapa em execução + pendentes), com piso de 10% da duração padrão e folga entre etapas. Chance de atraso = fração dos cenários que passa do prazo; P50/P90 = percentis do tempo restante.
+- **Status:** *Atrasada* (projeção após o prazo), *Em risco* (margem menor que {limite} min), *No prazo*.
+- **Minutos perdidos:** estouro do tempo padrão + espera acima do buffer, só em etapas concluídas.
+""")
+    tabela(r)
+    st.download_button("📥 Baixar resumo das ordens (CSV)", r.to_csv(index=False).encode("utf-8"),
+                       file_name="reversemilk_resumo_ordens.csv", mime="text/csv")
+    st.download_button("📥 Baixar etapas (CSV)", df.to_csv(index=False).encode("utf-8"),
+                       file_name="reversemilk_etapas.csv", mime="text/csv")
